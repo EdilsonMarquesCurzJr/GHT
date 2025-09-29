@@ -28,10 +28,9 @@
     "Estação D",
     "Estação E",
     "Estação F",
-      "Estação D",
+    "Estação D",
     "Estação E",
     "Estação F",
-
   ];
 
   // Cores de exemplo
@@ -241,17 +240,27 @@
       return { x, y, station: s.station, time: s.time };
     });
 
-    // polyline
-    const poly = document.createElementNS(
-      "http://www.w3.org/2000/svg",
-      "polyline"
-    );
-    poly.setAttribute("points", pts.map((p) => `${p.x},${p.y}`).join(" "));
-    poly.setAttribute("stroke", train.color);
-    poly.setAttribute("class", "polyline draggable");
-    poly.setAttribute("fill", "none");
-    poly.addEventListener("mousedown", onPolyMouseDown);
-    g.appendChild(poly);
+    // desenha cada segmento individualmente
+    for (let i = 1; i < pts.length; i++) {
+      const p1 = pts[i - 1];
+      const p2 = pts[i];
+      const line = document.createElementNS(
+        "http://www.w3.org/2000/svg",
+        "line"
+      );
+      line.setAttribute("x1", p1.x);
+      line.setAttribute("y1", p1.y);
+      line.setAttribute("x2", p2.x);
+      line.setAttribute("y2", p2.y);
+      line.setAttribute("stroke", train.color);
+      line.setAttribute("stroke-width", 2);
+      line.setAttribute("class", "polyline draggable");
+      if (p1.y !== p2.y) {
+        line.setAttribute("stroke-dasharray", "6,4");
+      }
+      line.addEventListener("mousedown", onPolyMouseDown);
+      g.appendChild(line);
+    }
 
     // label near first point
     if (pts.length > 0) {
@@ -533,8 +542,6 @@
     saveToStorage();
     render();
   });
-
-
 
   clearBtn.addEventListener("click", () => {
     if (confirm("Limpar armazenamento local e restaurar demo?")) {
