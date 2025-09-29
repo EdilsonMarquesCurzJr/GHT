@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+
+<title>Gráfico Hora–Trem (drag & edit)</title>
+<link rel="stylesheet" href="css/style.css">
+
+</head>
+<body>
+<h1>Gráfico Hora–Trem (arraste pontos & linhas) — Exemplo</h1>
+<div class="toolbar">
+  <div style="display:flex;gap:8px;align-items:center">
+    <button id="addTrain">➕ Adicionar Trem</button>
+    <button id="exportBtn">📤 Exportar JSON</button>
+    <button id="importBtn">📥 Importar JSON</button>
+    <button id="clearBtn" class="ghost">🗑️ Limpar armazenamento</button>
+  </div>
+  <div class="controls" style="margin-left:12px">
+    <div class="small">Snap: <strong id="snapLabel">5 min</strong></div>
+    <div style="width:10px"></div>
+    <div class="small">Tempo: <strong id="rangeLabel"></strong></div>
+  </div>
+</div>
+
+<div id="container">
+  <div class="canvas-wrap" style="height: calc(var(--h) + var(--time-height));">
+    <div class="left-panel" id="leftPanel"></div>
+    <div class="time-row" id="timeRow"></div>
+    <svg id="stage" width="1000" height="640" style="margin-left:var(--left);"></svg>
+  </div>
+</div>
+
+
+<footer>
+ Isso é um spike funcional. Ajuste o comportamento conforme necessidade.
+</footer>
+
+<script src="js/main.js"></script>
+</body>
+</html>
