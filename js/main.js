@@ -1,3 +1,27 @@
+// Verifica se um segmento cruza ou permanece dentro de uma restrição
+function segmentoProibido(stationIdx, t1, t2) {
+  // t1 < t2 sempre
+  if (t2 < t1) [t1, t2] = [t2, t1];
+  return restricoes.some(
+    (r) =>
+      r.station === stationIdx &&
+      // segmento começa antes e termina depois da restrição (atravessa)
+      t1 < r.end &&
+      t2 > r.start
+  );
+}
+// Restrições: exemplo [{ station: 2, start: 8*60, end: 9*60 }]
+const restricoes = [
+  // Exemplo: Estação C (índice 2), das 08:00 às 09:00
+  { station: 2, start: 8 * 60, end: 9 * 60 },
+  // Adicione mais restrições conforme necessário
+];
+
+function isRestrito(stationIdx, timeMin) {
+  return restricoes.some(
+    (r) => r.station === stationIdx && timeMin >= r.start && timeMin < r.end
+  );
+}
 /*
   Implementação do Gráfico Hora–Trem
   - modelo de dados simples: estações + trens com paradas (stationIndex, timeMinutes)
@@ -89,6 +113,55 @@
   const clearBtn = document.getElementById("clearBtn");
   const rangeLabel = document.getElementById("rangeLabel");
   const snapLabel = document.getElementById("snapLabel");
+
+  // Botão para adicionar restrição
+  let restrBtn = document.getElementById("addRestrBtn");
+  if (!restrBtn) {
+    restrBtn = document.createElement("button");
+    restrBtn.id = "addRestrBtn";
+    restrBtn.textContent = "Adicionar restrição";
+    restrBtn.style.margin = "8px 0 8px 8px";
+    restrBtn.style.padding = "6px 12px";
+    restrBtn.style.background = "#ffe4b2";
+    restrBtn.style.border = "1px solid #f59e0b";
+    restrBtn.style.borderRadius = "6px";
+    restrBtn.style.cursor = "pointer";
+    document.body.insertBefore(restrBtn, document.body.firstChild);
+  }
+
+  restrBtn.onclick = function () {
+    let est = prompt("Nome da estação para bloquear (ex: Estação C):");
+    if (!est) return;
+    let idx = stations.findIndex(
+      (s) => s.toLowerCase() === est.trim().toLowerCase()
+    );
+    if (idx === -1) {
+      alert("Estação não encontrada!");
+      return;
+    }
+    let hIni = prompt("Hora inicial (ex: 08:00):");
+    let hFim = prompt("Hora final (ex: 09:00):");
+    if (!hIni || !hFim) return;
+    function parseHora(h) {
+      let [hh, mm] = h.split(":").map(Number);
+      return hh * 60 + (mm || 0);
+    }
+    let start = parseHora(hIni);
+    let end = parseHora(hFim);
+    if (isNaN(start) || isNaN(end) || end <= start) {
+      alert("Horário inválido!");
+      return;
+    }
+    restricoes.push({ station: idx, start, end });
+    alert(
+      "Restrição adicionada para " +
+        stations[idx] +
+        " de " +
+        hIni +
+        " até " +
+        hFim
+    );
+  };
 
   // initialize sizes
   svg.setAttribute("width", config.width);
@@ -188,6 +261,28 @@
     svg.innerHTML = ""; // clear
     // background grid: vertical time grid & horizontal station lines
     const grid = document.createElementNS("http://www.w3.org/2000/svg", "g");
+    // --- VISUALIZAÇÃO DAS RESTRIÇÕES ---
+    restricoes.forEach((r) => {
+      const y = stationIndexToY(r.station) + config.timeRowHeight;
+      const y2 = y;
+      const h = 18; // altura da faixa
+      const x1 = minutesToX(r.start);
+      const x2 = minutesToX(r.end);
+      const rect = document.createElementNS(
+        "http://www.w3.org/2000/svg",
+        "rect"
+      );
+      rect.setAttribute("x", x1);
+      rect.setAttribute("y", y - h / 2);
+      rect.setAttribute("width", Math.max(1, x2 - x1));
+      rect.setAttribute("height", h);
+      rect.setAttribute("fill", "#f05a5a");
+      rect.setAttribute("fill-opacity", "0.18");
+      rect.setAttribute("stroke", "#f05a5a");
+      rect.setAttribute("stroke-width", "1");
+      rect.setAttribute("rx", "4");
+      grid.appendChild(rect);
+    });
     // horizontal station lines
     for (let i = 0; i < stations.length; i++) {
       const y = stationIndexToY(i) + config.timeRowHeight;
@@ -400,8 +495,83 @@
       initialTime: train.stops[stopIdx].time,
       initialStation: train.stops[stopIdx].station,
     };
-    document.addEventListener("mousemove", onMouseMove);
-    document.addEventListener("mouseup", onMouseUp);
+    document.addEventListener("mousemove", onMouseMoveRestrito);
+    document.addEventListener("mouseup", onMouseUpRestrito);
+    // Versão com restrição
+    function onMouseMoveRestrito(e) {
+      if (!dragState) return;
+      const dx = e.clientX - dragState.startX;
+      const dy = e.clientY - (dragState.startY || 0);
+      const deltaMin = snapMinutes(xToMinutes(dx) - xToMinutes(0));
+      if (dragState.type === "point") {
+        const train = getTrainById(dragState.trainId);
+        const sIdx = dragState.stopIdx;
+        const svgRect = svg.getBoundingClientRect();
+        const mouseX = e.clientX - svgRect.left;
+        const mouseY = e.clientY - svgRect.top;
+        let minutes = xToMinutes(mouseX);
+        minutes = snapMinutes(minutes);
+        minutes = clamp(minutes, config.startTimeMin, config.endTimeMin);
+        const prev = sIdx > 0 ? train.stops[sIdx - 1].time + 1 : -Infinity;
+        const next =
+          sIdx < train.stops.length - 1
+            ? train.stops[sIdx + 1].time - 1
+            : Infinity;
+        minutes = clamp(minutes, prev, next);
+        let stationIdx = yToStationIndex(mouseY - config.timeRowHeight);
+        stationIdx = clamp(stationIdx, 0, stations.length - 1);
+        // Checa restrição no ponto
+        if (isRestrito(stationIdx, minutes)) {
+          alert("Restrição: não pode parar nesta estação neste horário!");
+          dragState = null;
+          document.removeEventListener("mousemove", onMouseMoveRestrito);
+          document.removeEventListener("mouseup", onMouseUpRestrito);
+          return;
+        }
+        // Checa segmento anterior
+        if (sIdx > 0) {
+          const prevStop = train.stops[sIdx - 1];
+          if (
+            prevStop.station === stationIdx &&
+            segmentoProibido(stationIdx, prevStop.time, minutes)
+          ) {
+            alert(
+              "Restrição: o segmento anterior atravessa uma faixa proibida!"
+            );
+            dragState = null;
+            document.removeEventListener("mousemove", onMouseMoveRestrito);
+            document.removeEventListener("mouseup", onMouseUpRestrito);
+            return;
+          }
+        }
+        // Checa segmento seguinte
+        if (sIdx < train.stops.length - 1) {
+          const nextStop = train.stops[sIdx + 1];
+          if (
+            nextStop.station === stationIdx &&
+            segmentoProibido(stationIdx, minutes, nextStop.time)
+          ) {
+            alert(
+              "Restrição: o segmento seguinte atravessa uma faixa proibida!"
+            );
+            dragState = null;
+            document.removeEventListener("mousemove", onMouseMoveRestrito);
+            document.removeEventListener("mouseup", onMouseUpRestrito);
+            return;
+          }
+        }
+        train.stops[sIdx].time = minutes;
+        train.stops[sIdx].station = stationIdx;
+        saveToStorage();
+        render();
+      }
+    }
+
+    function onMouseUpRestrito(e) {
+      dragState = null;
+      document.removeEventListener("mousemove", onMouseMoveRestrito);
+      document.removeEventListener("mouseup", onMouseUpRestrito);
+    }
   }
 
   // polyline dragging (move all times)
@@ -450,6 +620,28 @@
       // vertical -> allow station change
       let stationIdx = yToStationIndex(mouseY - config.timeRowHeight);
       stationIdx = clamp(stationIdx, 0, stations.length - 1);
+      // Checa segmento anterior
+      if (sIdx > 0) {
+        const prevStop = train.stops[sIdx - 1];
+        if (
+          prevStop.station === stationIdx &&
+          segmentoProibido(stationIdx, prevStop.time, minutes)
+        ) {
+          alert("Restrição: o segmento anterior atravessa uma faixa proibida!");
+          return;
+        }
+      }
+      // Checa segmento seguinte
+      if (sIdx < train.stops.length - 1) {
+        const nextStop = train.stops[sIdx + 1];
+        if (
+          nextStop.station === stationIdx &&
+          segmentoProibido(stationIdx, minutes, nextStop.time)
+        ) {
+          alert("Restrição: o segmento seguinte atravessa uma faixa proibida!");
+          return;
+        }
+      }
       // update model
       train.stops[sIdx].time = minutes;
       train.stops[sIdx].station = stationIdx;
@@ -470,6 +662,14 @@
         if (newTimes[i] <= newTimes[i - 1]) {
           ok = false;
           break;
+        }
+        // Checa segmento para cada estação
+        if (
+          train.stops[i].station === train.stops[i - 1].station &&
+          segmentoProibido(train.stops[i].station, newTimes[i - 1], newTimes[i])
+        ) {
+          alert("Restrição: um segmento do trem atravessa uma faixa proibida!");
+          return;
         }
       }
       if (!ok) return;
@@ -504,6 +704,13 @@
         station: last.station,
         time: last.time + 5,
       };
+    }
+    // Checa restrição ao adicionar
+    if (isRestrito(newStop.station, newStop.time)) {
+      alert(
+        "Restrição: não pode adicionar parada nesta estação neste horário!"
+      );
+      return;
     }
     train.stops.push(newStop);
     saveToStorage();
