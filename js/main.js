@@ -71,15 +71,28 @@ function isRestrito(stationIdx, timeMin, date) {
   ];
 
   // Cores de exemplo
-  const palette = [
-    "#0b6797",
-    "#f05a5a",
-    "#20a39e",
-    "#8b5cf6",
-    "#f59e0b",
-    "#10b981",
-    "#ef6ab4",
-  ];
+const palette = [
+  "#0b6797",
+  "#f05a5a",
+  "#20a39e",
+  "#8b5cf6",
+  "#f59e0b",
+  "#10b981",
+  "#ef6ab4",
+  "#ff7f50",
+  "#6a5acd",
+  "#3cb371",
+  "#ff6347",
+  "#4682b4",
+  "#dda0dd",
+  "#00ced1",
+  "#ff69b4",
+  "#cd5c5c",
+  "#7fffd4",
+  "#ffb6c1",
+  "#9acd32",
+  "#ff4500"
+];
 
   // Modelo inicial: alguns trens demo
   /*const demoTrains = [
