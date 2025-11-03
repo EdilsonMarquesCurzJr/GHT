@@ -1,3 +1,22 @@
+import { config } from './config.js';
+import {
+  genId,
+  clamp,
+  minutesToX,
+  xToMinutes,
+  snapMinutes,
+  stationIndexToY,
+  yToStationIndex,
+  minutesToClock,
+  setStations,
+} from './utils.js';
+import * as trainsModel from './models/trains.js';
+import * as restrModel from './models/restricoes.js';
+import * as storage from './storage.js';
+import { stations } from './data/stations.js';
+import { palette } from './data/palette.js';
+import { render as renderModule, renderLeft as renderLeftModule } from './render.js';
+
 // helper: today's date in local YYYY-MM-DD
 const todayISO = (function () {
   const d = new Date();
@@ -14,27 +33,7 @@ let restricoes = [
   // Adicione mais restrições conforme necessário
 ];
 */
-// Verifica se um segmento cruza ou permanece dentro de uma restrição (considerando data)
-function segmentoProibido(stationIdx, t1, t2, date) {
-  // t1 < t2 sempre
-  if (t2 < t1) [t1, t2] = [t2, t1];
-  return restricoes.some((r) => {
-    const rDate = r.date || todayISO;
-    if (r.station !== stationIdx) return false;
-    if (rDate !== (date || todayISO)) return false;
-    // segmento começa antes e termina depois da restrição (atravessa) ou overlap
-    return t1 < r.end && t2 > r.start;
-  });
-}
-
-function isRestrito(stationIdx, timeMin, date) {
-  return restricoes.some((r) => {
-    const rDate = r.date || todayISO;
-    if (r.station !== stationIdx) return false;
-    if (rDate !== (date || todayISO)) return false;
-    return timeMin >= r.start && timeMin < r.end;
-  });
-}
+// restriction helpers are provided by js/models/restricoes.js (restrModel)
 /*
   Implementação do Gráfico Hora–Trem
   - modelo de dados simples: estações + trens com paradas (stationIndex, timeMinutes)
@@ -43,43 +42,9 @@ function isRestrito(stationIdx, timeMin, date) {
 */
 
 (function () {
-  // CONFIG
-  const config = {
-    width: 1200, // largura da área de desenho (exclui left panel)
-    height: 600,
-    leftWidth: 140,
-    timeRowHeight: 40,
-    startTimeMin: 0, // 00:00 em minutos
-    endTimeMin: 24 * 60, // 24:00 (meia-noite)
-    minutesPerTick: 60, // rótulo maior a cada 60 minutos
-    snapMin: 1, // snap (minutos)
-    stationHeight: 60,
-    pointRadius: 6,
-  };
 
-  // Estações (exemplo)
-  const stations = [
-    "Estação A",
-    "Estação B",
-    "Estação C",
-    "Estação D",
-    "Estação E",
-    "Estação F",
-    "Estação D",
-    "Estação E",
-    "Estação F",
-  ];
-
-  // Cores de exemplo
-  const palette = [
-    "#0b6797",
-    "#f05a5a",
-    "#20a39e",
-    "#8b5cf6",
-    "#f59e0b",
-    "#10b981",
-    "#ef6ab4",
-  ];
+  // inform utilities sobre o número de estações para calcular espaçamento
+  setStations(stations);
 
   // Modelo inicial: alguns trens demo
   /*const demoTrains = [
@@ -109,13 +74,14 @@ function isRestrito(stationIdx, timeMin, date) {
   ];*/
 
   // Estado (carrega do localStorage se existir um backup)
-  const _stored = loadFromStorage();
+  const _stored = storage.loadFromStorage();
+  let restricoes = [];
   if (_stored && _stored.restricoes) {
     // atualiza restricoes a partir do storage
     restricoes = _stored.restricoes;
   }
   let state = {
-    trains: (_stored && _stored.trains) || demoTrains,
+    trains: (_stored && _stored.trains) || [],
     selected: null, // {trainId, type:'point'|'line', index}
   };
 
@@ -131,6 +97,182 @@ function isRestrito(stationIdx, timeMin, date) {
   const clearBtn = document.getElementById("clearBtn");
   const rangeLabel = document.getElementById("rangeLabel");
   const snapLabel = document.getElementById("snapLabel");
+  // File System Access API handle for local trens.json (session only)
+  let localFileHandle = null;
+  // Directory handle for writing JS collections (js/data/*.js)
+  let localDirHandle = null;
+  // IndexedDB key name for persisted handle
+  const IDB_DB_NAME = "ght_fs_handles";
+  const IDB_STORE = "handles";
+  const IDB_KEY = "trens_file";
+
+  // FileSystem handle persistence is implemented in js/storage.js
+
+  // Button to configure remote save endpoint (Power Automate URL)
+  let saveEndpointBtn = document.getElementById("saveEndpointBtn");
+  if (!saveEndpointBtn) {
+    saveEndpointBtn = document.createElement("button");
+    saveEndpointBtn.id = "saveEndpointBtn";
+    saveEndpointBtn.textContent = "Configurar endpoint";
+    saveEndpointBtn.style.margin = "8px 0 8px 8px";
+    saveEndpointBtn.style.padding = "6px 12px";
+    saveEndpointBtn.style.background = "#e6f7ff";
+    saveEndpointBtn.style.border = "1px solid #7cc7ff";
+    saveEndpointBtn.style.borderRadius = "6px";
+    saveEndpointBtn.style.cursor = "pointer";
+    document.body.insertBefore(saveEndpointBtn, document.body.firstChild);
+  }
+  saveEndpointBtn.onclick = function () {
+    const current =
+      localStorage.getItem("saveEndpoint") || config.saveEndpoint || "";
+    const url = prompt(
+      "Cole a URL do endpoint HTTP (ex: Power Automate) para salvar trens.json\nDeixe vazio para limpar:",
+      current
+    );
+    if (url === null) return; // cancel
+    if (!url) {
+      localStorage.removeItem("saveEndpoint");
+      alert("Endpoint removido. O app usará o servidor local (se ativado).");
+      return;
+    }
+    localStorage.setItem("saveEndpoint", url.trim());
+    alert("Endpoint salvo: " + url.trim());
+  };
+
+  // Button to select a local file (File System Access API). If selected, app will write directly to it on each change.
+  let selectLocalBtn = document.getElementById("selectLocalBtn");
+  if (!selectLocalBtn) {
+    selectLocalBtn = document.createElement("button");
+    selectLocalBtn.id = "selectLocalBtn";
+    selectLocalBtn.textContent = "Selecionar arquivo local";
+    selectLocalBtn.style.margin = "8px 0 8px 8px";
+    selectLocalBtn.style.padding = "6px 12px";
+    selectLocalBtn.style.background = "#fffbe6";
+    selectLocalBtn.style.border = "1px solid #ffe08a";
+    selectLocalBtn.style.borderRadius = "6px";
+    selectLocalBtn.style.cursor = "pointer";
+    document.body.insertBefore(selectLocalBtn, document.body.firstChild);
+  }
+  selectLocalBtn.onclick = async function () {
+    if (window.showSaveFilePicker) {
+      try {
+        const handle = await window.showSaveFilePicker({
+          suggestedName: config.sharepointFileName || "trens.json",
+          types: [
+            {
+              description: "JSON",
+              accept: { "application/json": [".json"] },
+            },
+          ],
+        });
+        localFileHandle = handle;
+        // persist the handle so it can be reused across reloads
+        try {
+          await storage._persistHandle(handle);
+        } catch (err) {
+          console.warn(
+            "persistHandle failed:",
+            err && err.message ? err.message : err
+          );
+        }
+        // Immediately write current state to the selected file (overwrites it)
+        try {
+          storage.saveToStorage({ trains: state.trains, restricoes }, handle);
+        } catch (e) {
+          console.warn('initial write to selected file failed:', e && e.message ? e.message : e);
+        }
+        // if a directory for JS collections is set and enabled, write collections too
+        try {
+          if (localDirHandle) {
+            await storage.saveCollectionsToDir(localDirHandle, { trains: state.trains, restricoes });
+          }
+        } catch (e) {
+          console.warn('initial write to dir failed:', e && e.message ? e.message : e);
+        }
+        try {
+          selectLocalBtn.textContent =
+            "Arquivo: " + (handle.name || "trens.json");
+        } catch (e) {}
+        alert(
+          "Arquivo selecionado. As alterações serão gravadas nele enquanto a página estiver aberta."
+        );
+      } catch (e) {
+        console.warn("Seleção de arquivo cancelada", e);
+      }
+    } else {
+      alert(
+        "API de arquivos não suportada no seu navegador. Será usado download automático como fallback."
+      );
+    }
+  };
+
+  // try to restore previously selected handle (if any)
+  (async function () {
+    try {
+      const restored = await storage._restoreHandle();
+      if (restored) {
+        localFileHandle = restored;
+        try {
+          selectLocalBtn.textContent =
+            "Arquivo: " + (restored.name || "trens.json");
+        } catch (e) {}
+      }
+      // try to restore directory handle too
+      try {
+        const drest = await storage._restoreDirHandle();
+        if (drest) {
+          localDirHandle = drest;
+          try {
+            // display short name
+            const disp = drest.name || 'js/data';
+            // create/select button text when we add the button below
+          } catch (e) {}
+        }
+      } catch (e) {
+        console.warn('restoreDirHandle failed:', e && e.message ? e.message : e);
+      }
+    } catch (e) {
+      console.warn("restoreHandle failed:", e && e.message ? e.message : e);
+    }
+  })();
+
+  // small UI for enabling SharePoint direct save
+  let spSaveBtn = document.getElementById("spSaveBtn");
+  if (!spSaveBtn) {
+    spSaveBtn = document.createElement("button");
+    spSaveBtn.id = "spSaveBtn";
+    spSaveBtn.textContent = "Salvar no SharePoint: OFF";
+    spSaveBtn.style.margin = "8px 0 8px 8px";
+    spSaveBtn.style.padding = "6px 12px";
+    spSaveBtn.style.background = "#fff3f3";
+    spSaveBtn.style.border = "1px solid #f4b6b6";
+    spSaveBtn.style.borderRadius = "6px";
+    spSaveBtn.style.cursor = "pointer";
+    document.body.insertBefore(spSaveBtn, document.body.firstChild);
+  }
+  // initialize from config/localStorage
+  try {
+    const spOn =
+      localStorage.getItem("sharepointSave") === "true" ||
+      config.sharepointSave;
+    if (spOn) {
+      spSaveBtn.textContent = "Salvar no SharePoint: ON";
+      spSaveBtn.style.background = "#e6ffef";
+    }
+  } catch (e) {}
+  spSaveBtn.onclick = function () {
+    const cur = localStorage.getItem("sharepointSave") === "true";
+    const next = !cur;
+    localStorage.setItem("sharepointSave", next ? "true" : "false");
+    spSaveBtn.textContent = next
+      ? "Salvar no SharePoint: ON"
+      : "Salvar no SharePoint: OFF";
+    spSaveBtn.style.background = next ? "#e6ffef" : "#fff3f3";
+    if (next)
+      alert(
+        "SharePoint save ligado. Verifique config.sharepointFolder e cole o script dentro de uma página SharePoint autenticada."
+      );
+  };
 
   // Botão para adicionar restrição
   let restrBtn = document.getElementById("addRestrBtn");
@@ -165,379 +307,112 @@ function isRestrito(stationIdx, timeMin, date) {
       return hh * 60 + (mm || 0);
     }
     let start = parseHora(hIni);
-    let end = parseHora(hFim);
-    if (isNaN(start) || isNaN(end) || end <= start) {
-      alert("Horário inválido!");
-      return;
-    }
-    restricoes.push({ station: idx, start, end, date: todayISO });
-    alert(
-      "Restrição adicionada para " +
-        stations[idx] +
-        " de " +
-        hIni +
-        " até " +
-        hFim
-    );
-    render();
+    // storage functions moved to js/storage.js; use storage.saveToStorage(...) when needed
   };
 
-  // initialize sizes
-  svg.setAttribute("width", config.width);
-  svg.setAttribute("height", config.height + config.timeRowHeight);
-  document.documentElement.style.setProperty(
-    "--w",
-    config.width + config.leftWidth + 20 + "px"
-  );
-  document.documentElement.style.setProperty("--h", config.height + "px");
-
-  // helpers
-  function genId() {
-    return "t" + Math.floor(Math.random() * 1e9).toString(36);
-  }
-  function clamp(v, a, b) {
-    return Math.max(a, Math.min(b, v));
-  }
-  function minutesToX(min) {
-    const span = config.endTimeMin - config.startTimeMin;
-    const rel = (min - config.startTimeMin) / span;
-    return Math.round(rel * config.width);
-  }
-  function xToMinutes(x) {
-    const span = config.endTimeMin - config.startTimeMin;
-    const rel = x / config.width;
-    return config.startTimeMin + rel * span;
-  }
-  function snapMinutes(min) {
-    const s = config.snapMin;
-    return Math.round(min / s) * s;
-  }
-  function stationIndexToY(idx) {
-    const totalStations = stations.length;
-    const gap = config.height / (totalStations - 1);
-    return Math.round(idx * gap);
-  }
-  function yToStationIndex(y) {
-    // snap to nearest station
-    const totalStations = stations.length;
-    const gap = config.height / (totalStations - 1);
-    const idx = Math.round(y / gap);
-    return clamp(idx, 0, totalStations - 1);
+  // Button to select a directory where JS collection files will be written (js/data/*.js)
+  let selectDirBtn = document.getElementById('selectDirBtn');
+  if (!selectDirBtn) {
+    selectDirBtn = document.createElement('button');
+    selectDirBtn.id = 'selectDirBtn';
+    selectDirBtn.textContent = 'Selecionar pasta (JS)';
+    selectDirBtn.style.margin = '8px 0 8px 8px';
+    selectDirBtn.style.padding = '6px 12px';
+    selectDirBtn.style.background = '#f0f7ff';
+    selectDirBtn.style.border = '1px solid #a7d1ff';
+    selectDirBtn.style.borderRadius = '6px';
+    selectDirBtn.style.cursor = 'pointer';
+    document.body.insertBefore(selectDirBtn, document.body.firstChild);
   }
 
-  // render left station list and time row
-  function renderLeft() {
-    leftPanel.innerHTML = "";
-    for (let i = 0; i < stations.length; i++) {
-      const div = document.createElement("div");
-      div.className = "station";
-      div.style.height = config.height / (stations.length - 1) + "px";
-      div.innerHTML = `<div style="display:flex;align-items:center"><div class="dot" style="background:${
-        palette[i % palette.length]
-      }"></div><div>${stations[i]}</div></div>`;
-      leftPanel.appendChild(div);
+  // toggle to enable/disable writing JS collections on every save
+  let dirSaveBtn = document.getElementById('dirSaveBtn');
+  let dirSaveEnabled = false;
+  if (!dirSaveBtn) {
+    dirSaveBtn = document.createElement('button');
+    dirSaveBtn.id = 'dirSaveBtn';
+    dirSaveBtn.textContent = 'Salvar JS em pasta: OFF';
+    dirSaveBtn.style.margin = '8px 0 8px 8px';
+    dirSaveBtn.style.padding = '6px 12px';
+    dirSaveBtn.style.background = '#fff3f3';
+    dirSaveBtn.style.border = '1px solid #f4b6b6';
+    dirSaveBtn.style.borderRadius = '6px';
+    dirSaveBtn.style.cursor = 'pointer';
+    document.body.insertBefore(dirSaveBtn, document.body.firstChild);
+  }
+  dirSaveBtn.onclick = async function () {
+    dirSaveEnabled = !dirSaveEnabled;
+    dirSaveBtn.textContent = dirSaveEnabled
+      ? 'Salvar JS em pasta: ON'
+      : 'Salvar JS em pasta: OFF';
+    dirSaveBtn.style.background = dirSaveEnabled ? '#e6ffef' : '#fff3f3';
+    if (dirSaveEnabled && !localDirHandle) {
+      alert('Escolha uma pasta onde os arquivos js/data/*.js serão gravados.');
+      try {
+        await selectDirBtn.onclick();
+      } catch (e) {}
     }
-    // time labels
-    timeRow.innerHTML = "";
-    const span = config.endTimeMin - config.startTimeMin;
-    const ticks = Math.ceil(span / config.minutesPerTick);
-    for (let i = 0; i <= ticks; i++) {
-      const m = config.startTimeMin + i * config.minutesPerTick;
-      const label = minutesToClock(m);
-      const x = minutesToX(m);
-      const el = document.createElement("div");
-      el.className = "time-label";
-      el.style.position = "absolute";
-      el.style.left = config.leftWidth + x + 6 + "px";
-      el.innerText = label;
-      timeRow.appendChild(el);
-      // thin tick
-      const tick = document.createElement("div");
-      tick.style.position = "absolute";
-      tick.style.left = config.leftWidth + x + "px";
-      tick.style.top = "28px";
-      tick.style.width = "1px";
-      tick.style.height = "12px";
-      tick.style.background = "#dbe7fb";
-      timeRow.appendChild(tick);
+  };
+
+  selectDirBtn.onclick = async function () {
+    if (!window.showDirectoryPicker) {
+      alert('showDirectoryPicker não suportado neste navegador.');
+      return;
     }
-    rangeLabel.innerText =
-      minutesToClock(config.startTimeMin) +
-      " — " +
-      minutesToClock(config.endTimeMin);
-    snapLabel.innerText = config.snapMin + " min";
-  }
-
-  function minutesToClock(min) {
-    // mostra 24:00 se for exatamente o fim do dia (1440 minutos)
-    if (min === 24 * 60) return "24:00";
-    // normaliza para 0..23h
-    const hh = Math.floor(min / 60) % 24;
-    const mm = Math.floor(min % 60);
-    return `${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}`;
-  }
-
-  // main render of trains
-  function render() {
-    svg.innerHTML = ""; // clear
-    // background grid: vertical time grid & horizontal station lines
-    const grid = document.createElementNS("http://www.w3.org/2000/svg", "g");
-    // --- VISUALIZAÇÃO DAS RESTRIÇÕES ---
-    restricoes.forEach((r, ri) => {
-      const y = stationIndexToY(r.station) + config.timeRowHeight;
-      const h = 18; // altura da faixa
-      const x1 = minutesToX(r.start);
-      const x2 = minutesToX(r.end);
-      const rect = document.createElementNS(
-        "http://www.w3.org/2000/svg",
-        "rect"
-      );
-      rect.setAttribute("x", x1);
-      rect.setAttribute("y", y - h / 2);
-      rect.setAttribute("width", Math.max(1, x2 - x1));
-      rect.setAttribute("height", h);
-      rect.setAttribute("fill", "#f05a5a");
-      rect.setAttribute("fill-opacity", "0.18");
-      rect.setAttribute("stroke", "#f05a5a");
-      rect.setAttribute("stroke-width", "1");
-      rect.setAttribute("rx", "4");
-      grid.appendChild(rect);
-
-      // small delete button above the restriction (similar style to train remove)
-      const bx = Math.round((x1 + x2) / 2) - 10;
-      const by = y - h / 2 - 20;
-      const btn = document.createElementNS("http://www.w3.org/2000/svg", "g");
-      btn.setAttribute("class", "restr-del");
-
-      const brect = document.createElementNS(
-        "http://www.w3.org/2000/svg",
-        "rect"
-      );
-      brect.setAttribute("x", bx);
-      brect.setAttribute("y", by);
-      brect.setAttribute("width", 20);
-      brect.setAttribute("height", 16);
-      brect.setAttribute("rx", 4);
-      brect.setAttribute("fill", "#ffeded");
-      brect.setAttribute("stroke", "#ffbcbc");
-      brect.style.cursor = "pointer";
-      btn.appendChild(brect);
-
-      const btxt = document.createElementNS(
-        "http://www.w3.org/2000/svg",
-        "text"
-      );
-      btxt.setAttribute("x", bx + 10);
-      btxt.setAttribute("y", by + 12);
-      btxt.setAttribute("fill", "#b33");
-      btxt.setAttribute("font-size", "12");
-      btxt.setAttribute("text-anchor", "middle");
-      btxt.style.pointerEvents = "none";
-      btxt.textContent = "✕";
-      btn.appendChild(btxt);
-
-      // remove handler
-      btn.addEventListener("click", (ev) => {
-        ev.stopPropagation();
-        if (confirm("Remover restrição nesta estação?")) {
-          restricoes.splice(ri, 1);
-          render();
-        }
-      });
-
-      grid.appendChild(btn);
-    });
-    // horizontal station lines
-    for (let i = 0; i < stations.length; i++) {
-      const y = stationIndexToY(i) + config.timeRowHeight;
-      const line = document.createElementNS(
-        "http://www.w3.org/2000/svg",
-        "line"
-      );
-      line.setAttribute("x1", 0);
-      line.setAttribute("x2", config.width);
-      line.setAttribute("y1", y);
-      line.setAttribute("y2", y);
-      line.setAttribute("stroke", "#eef4ff");
-      line.setAttribute("stroke-width", 1);
-      grid.appendChild(line);
-    }
-    // vertical thin ticks every 30min
-    const span = config.endTimeMin - config.startTimeMin;
-    const step = 30;
-    for (let m = config.startTimeMin; m <= config.endTimeMin; m += step) {
-      const x = minutesToX(m);
-      const v = document.createElementNS("http://www.w3.org/2000/svg", "line");
-      v.setAttribute("x1", x);
-      v.setAttribute("x2", x);
-      v.setAttribute("y1", config.timeRowHeight);
-      v.setAttribute("y2", config.height + config.timeRowHeight);
-      v.setAttribute("stroke", "#f1f5fb");
-      v.setAttribute("stroke-width", 1);
-      grid.appendChild(v);
-    }
-    svg.appendChild(grid);
-
-    // group for trains
-    const trainsG = document.createElementNS("http://www.w3.org/2000/svg", "g");
-    trainsG.setAttribute("transform", `translate(0,0)`);
-    svg.appendChild(trainsG);
-
-    // draw each train
-    state.trains.forEach((train, ti) => {
-      drawTrain(train, trainsG);
-    });
-  }
-
-  function drawTrain(train, parent) {
-    const g = document.createElementNS("http://www.w3.org/2000/svg", "g");
-    g.setAttribute("data-train-id", train.id);
-    // compute points
-    const pts = train.stops.map((s) => {
-      const x = minutesToX(s.time);
-      const y = stationIndexToY(s.station) + config.timeRowHeight;
-      return { x, y, station: s.station, time: s.time };
-    });
-
-    // desenha cada segmento individualmente
-    for (let i = 1; i < pts.length; i++) {
-      const p1 = pts[i - 1];
-      const p2 = pts[i];
-      const line = document.createElementNS(
-        "http://www.w3.org/2000/svg",
-        "line"
-      );
-      line.setAttribute("x1", p1.x);
-      line.setAttribute("y1", p1.y);
-      line.setAttribute("x2", p2.x);
-      line.setAttribute("y2", p2.y);
-      line.setAttribute("stroke", train.color);
-      line.setAttribute("stroke-width", 2);
-      line.setAttribute("class", "polyline draggable");
-      if (p1.y !== p2.y) {
-        line.setAttribute("stroke-dasharray", "6,4");
+    try {
+      const handle = await window.showDirectoryPicker();
+      if (!handle) return;
+      localDirHandle = handle;
+      try {
+        await storage._persistDirHandle(handle);
+      } catch (e) {
+        console.warn('persistDirHandle failed:', e && e.message ? e.message : e);
       }
-      line.addEventListener("mousedown", onPolyMouseDown);
-      g.appendChild(line);
-    }
-
-    // label near first point
-    if (pts.length > 0) {
-      const lab = document.createElementNS(
-        "http://www.w3.org/2000/svg",
-        "text"
-      );
-      lab.setAttribute("x", Math.max(pts[0].x - 40, 2));
-      lab.setAttribute("y", pts[0].y - 8);
-      lab.setAttribute("class", "train-label");
-      lab.setAttribute("fill", train.color);
-      lab.textContent = train.name;
-      g.appendChild(lab);
-    }
-
-    // points
-    pts.forEach((p, idx) => {
-      const circle = document.createElementNS(
-        "http://www.w3.org/2000/svg",
-        "circle"
-      );
-      circle.setAttribute("cx", p.x);
-      circle.setAttribute("cy", p.y);
-      circle.setAttribute("r", config.pointRadius);
-      circle.setAttribute("fill", train.color);
-      circle.setAttribute("class", "point draggable");
-      circle.setAttribute("data-train-id", train.id);
-      circle.setAttribute("data-stop-idx", idx);
-      circle.addEventListener("mousedown", onPointMouseDown);
-      // label time
-      const tlabel = document.createElementNS(
-        "http://www.w3.org/2000/svg",
-        "text"
-      );
-      tlabel.setAttribute("x", p.x + 10);
-      tlabel.setAttribute("y", p.y + 4);
-      tlabel.setAttribute("class", "small");
-      tlabel.setAttribute("fill", "#102734");
-      tlabel.textContent = minutesToClock(p.time);
-      g.appendChild(tlabel);
-      g.appendChild(circle);
-    });
-
-    // add a small delete button (SVG rect) at end
-    const last = pts[pts.length - 1];
-    if (last) {
-      const del = document.createElementNS(
-        "http://www.w3.org/2000/svg",
-        "rect"
-      );
-      del.setAttribute("x", last.x + 8);
-      del.setAttribute("y", last.y - 50);
-      del.setAttribute("width", 18);
-      del.setAttribute("height", 18);
-      del.setAttribute("rx", 4);
-      del.setAttribute("fill", "#ffeded");
-      del.setAttribute("stroke", "#ffbcbc");
-      del.setAttribute("class", "draggable");
-      del.style.cursor = "pointer";
-      del.addEventListener("click", (e) => {
-        e.stopPropagation();
-        if (confirm('Remover trem "' + train.name + '"?')) {
-          removeTrain(train.id);
+      try {
+        selectDirBtn.textContent = 'Pasta: ' + (handle.name || 'js');
+      } catch (e) {}
+      // if enabled, write files immediately
+      if (dirSaveEnabled) {
+        try {
+          await storage.saveCollectionsToDir(localDirHandle, { trains: state.trains, restricoes });
+          alert('Arquivos JS escritos em ' + (handle.name || 'pasta selecionada'));
+        } catch (e) {
+          console.warn('write collections failed:', e && e.message ? e.message : e);
+          alert('Falha ao gravar arquivos JS: ' + (e && e.message ? e.message : e));
         }
-      });
-      const txt = document.createElementNS(
-        "http://www.w3.org/2000/svg",
-        "text"
-      );
-      txt.setAttribute("x", last.x + 17);
-      txt.setAttribute("y", last.y - 38);
-      txt.setAttribute("fill", "#b33");
-      txt.setAttribute("font-size", "12");
-      txt.setAttribute("text-anchor", "middle");
-      txt.style.pointerEvents = "none";
-      txt.textContent = "✕";
-      g.appendChild(del);
-      g.appendChild(txt);
+      }
+    } catch (e) {
+      console.warn('selectDir cancelled or failed', e);
     }
+  };
 
-    if (last) {
-      const del = document.createElementNS(
-        "http://www.w3.org/2000/svg",
-        "rect"
-      );
-      del.setAttribute("x", last.x + 8);
-      del.setAttribute("y", last.y - 25);
-      del.setAttribute("width", 18);
-      del.setAttribute("height", 18);
-      del.setAttribute("rx", 4);
-      del.setAttribute("fill", "#29e6498b");
-      del.setAttribute("stroke", "#29e6498b");
-      del.setAttribute("class", "draggable");
-      del.style.cursor = "pointer";
-      del.addEventListener("click", (e) => {
-        e.stopPropagation();
-        AddVertice(train.id);
-      });
-      const txt = document.createElementNS(
-        "http://www.w3.org/2000/svg",
-        "text"
-      );
-      txt.setAttribute("x", last.x + 17);
-      txt.setAttribute("y", last.y - 13);
-      txt.setAttribute("fill", "rgba(255, 255, 255, 1)");
-      txt.setAttribute("font-size", "12");
-      txt.setAttribute("text-anchor", "middle");
-      txt.style.pointerEvents = "none";
-      txt.textContent = "+";
-      g.appendChild(del);
-      g.appendChild(txt);
-    }
+  // Use render module to draw left panel and main svg. We wrap it so other code can keep calling `render()`.
+  function renderLeft() {
+    renderLeftModule(leftPanel, timeRow, stations);
+  }
 
-    parent.appendChild(g);
+  function render() {
+    const handlers = {
+      onPolyMouseDown,
+      onPointMouseDown,
+      onRemoveTrain: removeTrain,
+      onAddVertex: AddVertice,
+      onRemoveRestr: (ri) => {
+        restricoes.splice(ri, 1);
+        // use wrapper (respects autosave flag)
+        saveToStorage();
+        render();
+      },
+    };
+    renderModule(svg, state, restricoes, stations, handlers);
   }
 
   // Interaction state
   let dragState = null; // {type:'point'|'poly', trainId, stopIdx, startX, startY, initialTimes[], initialStations[]}
+
+  // Autosave control: when false the app will not write to the file on every change.
+  // You can set this to true to re-enable automatic writes.
+  let autoSaveEnabled = false;
 
   // point dragging
   function onPointMouseDown(e) {
@@ -559,93 +434,10 @@ function isRestrito(stationIdx, timeMin, date) {
       initialTime: train.stops[stopIdx].time,
       initialStation: train.stops[stopIdx].station,
     };
-    document.addEventListener("mousemove", onMouseMoveRestrito);
-    document.addEventListener("mouseup", onMouseUpRestrito);
-    // Versão com restrição
-    function onMouseMoveRestrito(e) {
-      if (!dragState) return;
-      const dx = e.clientX - dragState.startX;
-      const dy = e.clientY - (dragState.startY || 0);
-      const deltaMin = snapMinutes(xToMinutes(dx) - xToMinutes(0));
-      if (dragState.type === "point") {
-        const train = getTrainById(dragState.trainId);
-        const sIdx = dragState.stopIdx;
-        const svgRect = svg.getBoundingClientRect();
-        const mouseX = e.clientX - svgRect.left;
-        const mouseY = e.clientY - svgRect.top;
-        let minutes = xToMinutes(mouseX);
-        minutes = snapMinutes(minutes);
-        minutes = clamp(minutes, config.startTimeMin, config.endTimeMin);
-        const prev = sIdx > 0 ? train.stops[sIdx - 1].time + 1 : -Infinity;
-        const next =
-          sIdx < train.stops.length - 1
-            ? train.stops[sIdx + 1].time - 1
-            : Infinity;
-        minutes = clamp(minutes, prev, next);
-        let stationIdx = yToStationIndex(mouseY - config.timeRowHeight);
-        stationIdx = clamp(stationIdx, 0, stations.length - 1);
-        // Checa restrição no ponto
-        /*if (isRestrito(stationIdx, minutes)) {
-          alert("Restrição: não pode parar nesta estação neste horário!");
-          dragState = null;
-          document.removeEventListener("mousemove", onMouseMoveRestrito);
-          document.removeEventListener("mouseup", onMouseUpRestrito);
-          return;
-        }*/
-        // Checa segmento anterior
-        /*if (sIdx > 0) {
-          const prevStop = train.stops[sIdx - 1];
-          if (
-            prevStop.station === stationIdx &&
-            segmentoProibido(
-              stationIdx,
-              prevStop.time,
-              minutes,
-              prevStop.date || todayISO
-            )
-          ) {
-            alert(
-              "Restrição: o segmento anterior atravessa uma faixa proibida!"
-            );
-            dragState = null;
-            document.removeEventListener("mousemove", onMouseMoveRestrito);
-            document.removeEventListener("mouseup", onMouseUpRestrito);
-            return;
-          }
-        }
-        // Checa segmento seguinte
-        if (sIdx < train.stops.length - 1) {
-          const nextStop = train.stops[sIdx + 1];
-          if (
-            nextStop.station === stationIdx &&
-            segmentoProibido(
-              stationIdx,
-              minutes,
-              nextStop.time,
-              nextStop.date || todayISO
-            )
-          ) {
-            alert(
-              "Restrição: o segmento seguinte atravessa uma faixa proibida!"
-            );
-            dragState = null;
-            document.removeEventListener("mousemove", onMouseMoveRestrito);
-            document.removeEventListener("mouseup", onMouseUpRestrito);
-            return;
-          }
-        }*/
-        train.stops[sIdx].time = minutes;
-        train.stops[sIdx].station = stationIdx;
-        saveToStorage();
-        render();
-      }
-    }
-
-    function onMouseUpRestrito(e) {
-      dragState = null;
-      document.removeEventListener("mousemove", onMouseMoveRestrito);
-      document.removeEventListener("mouseup", onMouseUpRestrito);
-    }
+    // Use the shared onMouseMove / onMouseUp handlers so dragging is active
+    // only while the mouse button is pressed. onMouseUp will remove listeners.
+    document.addEventListener("mousemove", onMouseMove);
+    document.addEventListener("mouseup", onMouseUp);
   }
 
   // polyline dragging (move all times)
@@ -763,6 +555,7 @@ function isRestrito(stationIdx, timeMin, date) {
       }
       if (!ok) return;
       train.stops.forEach((s, idx) => (s.time = newTimes[idx]));
+      // use wrapper (respects autosave flag)
       saveToStorage();
       render();
     }
@@ -776,57 +569,50 @@ function isRestrito(stationIdx, timeMin, date) {
 
   // utils
   function getTrainById(id) {
-    return state.trains.find((t) => t.id === id);
+    return trainsModel.getTrainById(state.trains, id);
   }
   function removeTrain(id) {
-    state.trains = state.trains.filter((t) => t.id !== id);
-    saveToStorage();
-    render();
+    const ok = trainsModel.removeTrain(state.trains, id);
+    if (ok) {
+      // use wrapper so autosave can be disabled
+      saveToStorage();
+      render();
+    }
   }
   function AddVertice(id) {
-    const train = state.trains.find((t) => t.id === id);
+    const train = trainsModel.getTrainById(state.trains, id);
     if (!train) return;
-    let newStop = { station: 0, time: 0 };
-    if (train.stops.length > 0) {
-      const last = train.stops[train.stops.length - 1];
-      newStop = {
-        station: last.station,
-        time: last.time + 5,
-        date: last.date || todayISO,
-      };
-    }
-    // Checa restrição ao adicionar
-    if (isRestrito(newStop.station, newStop.time, newStop.date)) {
-      alert(
-        "Restrição: não pode adicionar parada nesta estação neste horário!"
-      );
+    const newStop = trainsModel.createVertexForTrain(train, todayISO);
+    if (restrModel.isRestrito(restricoes, newStop.station, newStop.time, newStop.date, todayISO)) {
+      alert('Restrição: não pode adicionar parada nesta estação neste horário!');
       return;
     }
     train.stops.push(newStop);
+    // use wrapper (respects autosave flag)
     saveToStorage();
     render();
   }
 
-  // storage
+  // storage is provided by js/storage.js
   function saveToStorage() {
-    try {
-      const payload = { trains: state.trains, restricoes };
-      localStorage.setItem("timetable_v1", JSON.stringify(payload));
-    } catch (e) {}
+    // Respect autosave flag: do not write automatically on every change when disabled.
+    if (!autoSaveEnabled) {
+      // autosave disabled - skip writing
+      // console.debug('autosave disabled — skipping write');
+      return;
+    }
+    storage.saveToStorage({ trains: state.trains, restricoes }, localFileHandle);
+    // additionally write JS collection files into selected directory when enabled
+    if (dirSaveEnabled && localDirHandle) {
+      try {
+        storage.saveCollectionsToDir(localDirHandle, { trains: state.trains, restricoes });
+      } catch (e) {
+        console.warn('saveCollectionsToDir failed:', e && e.message ? e.message : e);
+      }
+    }
   }
   function loadFromStorage() {
-    try {
-      const s = localStorage.getItem("timetable_v1");
-      if (!s) return null;
-      const parsed = JSON.parse(s);
-      // backward compatibility: older value might be just an array of trains
-      if (Array.isArray(parsed)) {
-        return { trains: parsed, restricoes: [] };
-      }
-      return parsed;
-    } catch (e) {
-      return null;
-    }
+    return storage.loadFromStorage();
   }
 
   // add train
@@ -850,7 +636,7 @@ function isRestrito(stationIdx, timeMin, date) {
   clearBtn.addEventListener("click", () => {
     if (confirm("Limpar armazenamento local e restaurar demo?")) {
       localStorage.removeItem("timetable_v1");
-      state.trains = demoTrains.slice();
+      state.trains = [];
       render();
     }
   });
@@ -937,7 +723,7 @@ function isRestrito(stationIdx, timeMin, date) {
     alert("Dados importados com sucesso.");
   }
 
-  // initial render
-  renderLeft();
+  // initial render: render svg first (sets svg width) then render left panel which depends on minutesToX
   render();
+  renderLeft();
 })();

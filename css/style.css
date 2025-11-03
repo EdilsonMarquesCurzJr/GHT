@@ -1,5 +1,5 @@
 :root {
-  --w: 1100px;
+  --w: 98vw;
   --h: 600px;
   --left: 140px;
   /* espaço para nomes de estações */
@@ -93,7 +93,7 @@ svg {
 /* make the time row scroll horizontally with the canvas but stick to the top vertically */
 .time-row {
   position: absolute;
-  left: 0;
+  left: 277px;
   right: 0;
   top: 0;
   height: var(--time-height);
@@ -102,6 +102,7 @@ svg {
   border-bottom: 1px solid var(--grid);
   box-sizing: border-box;
   padding-left: 6px;
+  gap: 10px;
   background: transparent;
   z-index: 20
 }
